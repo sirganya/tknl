@@ -2,6 +2,7 @@ import { DurableObject } from "cloudflare:workers";
 import type { Env } from "../env";
 import type { DOResult, Token, TokenState } from "../types";
 import { err } from "../types";
+import { auditAppend } from "../services/audit";
 
 /**
  * TokenDO — one per token, addressed by idFromName(tid).
@@ -188,8 +189,7 @@ export class TokenDO extends DurableObject<Env> {
     event: "TOKEN_VOIDED" | "TOKEN_EXPIRED",
     actor?: string,
   ): Promise<DOResult> {
-    const audit = this.env.AUDIT_DO.get(this.env.AUDIT_DO.idFromName(rec.org));
-    const appended = await audit.append(rec.org, {
+    const appended = await auditAppend(this.env, rec.org, {
       event,
       tid: rec.token.tid,
       principal: rec.token.principal,

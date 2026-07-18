@@ -22,6 +22,7 @@
       { "name": "BUDGET_DO", "class_name": "BudgetDO" },
       { "name": "PRINCIPAL_DO", "class_name": "PrincipalDO" },
       { "name": "AUDIT_DO", "class_name": "AuditChainDO" },
+      { "name": "AUDIT_DIR", "class_name": "AuditDirectoryDO" },
       { "name": "IDEMPOTENCY_DO", "class_name": "IdempotencyDO" },
       { "name": "APPROVAL_DO", "class_name": "ApprovalDO" }
     ]
@@ -37,6 +38,10 @@
         "IdempotencyDO",
         "ApprovalDO"
       ]
+    },
+    {
+      "tag": "v2",
+      "new_sqlite_classes": ["AuditDirectoryDO"]
     }
   ],
 

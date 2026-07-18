@@ -8,15 +8,46 @@ import { jcs } from "../lib/jcs";
 import { merkleProof, merkleRoot, type ProofStep } from "../lib/merkle";
 
 /**
- * AuditChainDO — one per organisation. Append-only, hash-chained ledger.
+ * AuditChainDO — one SEGMENT of an org's append-only, hash-chained ledger.
+ *
+ * A single DO per org caps the org's whole transaction rate, because audit
+ * appends are synchronous and in the critical path of every value operation.
+ * The chain is therefore sharded by time period: one DO per (org, UTC day),
+ * addressed by `idFromName(org + ":" + period)`. The pre-sharding single DO
+ * (addressed by org alone) is the "legacy" segment — still readable in place,
+ * never copied. Sequence numbers are GLOBAL and monotonic across segments, and
+ * the hash-chain format is unchanged:
  *
  *   entry_hash(n) = sha256( utf8(JCS(entry minus entry_hash)) || utf8(prev_hash(n)) )
- *   prev_hash(n)  = entry_hash(n-1); genesis uses a fixed org-scoped seed.
+ *   prev_hash(n)  = entry_hash(n-1); the org's very first entry uses the
+ *                   fixed org-scoped genesis seed.
  *
- * This DO is the source of truth for audit history. D1 rows and R2 segments
- * are derived from it (via the fan-out queue and hourly checkpoint job) and
- * can always be rebuilt. Audit appends are synchronous and in the critical
- * path of every value operation: if append fails, the operation fails.
+ * ## Boundary protocol (chain continuity across segments)
+ *
+ * The critical invariant is that segment N's first entry links to segment
+ * N-1's head with no fork at the period boundary. The predecessor's DO is the
+ * single writer for its own head, so continuity is anchored there:
+ *
+ *  1. A segment's first append runs `initSegment` inside blockConcurrencyWhile
+ *     (so concurrent first-appends cannot interleave the protocol).
+ *  2. It asks the org's AuditDirectoryDO for the latest known segment.
+ *     - none, and the legacy DO has entries → the predecessor is the legacy DO
+ *     - none, legacy empty                  → chain starts at the genesis seed
+ *     - some earlier segment                → that segment is the predecessor
+ *  3. It calls `seal()` on the predecessor. Sealing is atomic in the
+ *     predecessor (single writer): it rejects every later append with code
+ *     "sealed" and returns its final {seq, head} — idempotently, so a crashed
+ *     init can simply re-run. Only AFTER the predecessor is sealed does the
+ *     new segment learn its base (prev hash + first seq) and accept appends;
+ *     nothing can extend the predecessor afterwards, so a fork is impossible.
+ *  4. It persists its init record, then registers the transition in the
+ *     directory (`advance`, also idempotent). A "registered" flag makes a
+ *     crash between those two steps self-healing on the next append.
+ *
+ * A Worker whose clock still says period P after P has been sealed gets the
+ * "sealed" rejection and retries against the directory's latest segment (see
+ * services/audit.ts) — appends never silently drop, and audit-before-effect
+ * failure semantics are preserved for the caller.
  */
 const SEQ_PAD = 12;
 
@@ -39,8 +70,41 @@ export async function computeEntryHash(entryWithoutHash: Omit<AuditEntry, "entry
   return "sha256:" + hex(digest);
 }
 
+interface SegmentInit {
+  period: string;
+  /** Last global seq before this segment (0 for the org's first segment). */
+  baseSeq: number;
+  /** Head hash this segment chains from (genesis seed for the first). */
+  basePrev: string;
+}
+
 export class AuditChainDO extends DurableObject<Env> {
-  async append(org: string, body: AuditEntryBody): Promise<DOResult<{ entry: AuditEntry }>> {
+  /**
+   * Append an entry. `period` is set by the routing service for sharded
+   * segments; calls without it hit a legacy (pre-sharding) DO and keep the
+   * original genesis-anchored behaviour until the DO is sealed.
+   */
+  async append(
+    org: string,
+    body: AuditEntryBody,
+    period?: string,
+  ): Promise<DOResult<{ entry: AuditEntry }>> {
+    if (await this.ctx.storage.get<boolean>("sealed")) {
+      return err("sealed", "segment is sealed; append to the active segment");
+    }
+    if (period !== undefined) {
+      if ((await this.ctx.storage.get<SegmentInit>("init")) === undefined) {
+        await this.ctx.blockConcurrencyWhile(() => this.initSegment(org, period));
+        if ((await this.ctx.storage.get<SegmentInit>("init")) === undefined) {
+          // A newer segment is already active (slow clock) — do not fork.
+          return err("stale_period", `period ${period} is older than the active segment`);
+        }
+      } else if ((await this.ctx.storage.get<boolean>("registered")) !== true) {
+        // Crash between init and directory registration — self-heal.
+        await this.register(org);
+      }
+    }
+
     const storedOrg = await this.ctx.storage.get<string>("org");
     if (storedOrg === undefined) await this.ctx.storage.put("org", org);
     else if (storedOrg !== org) return err("org_mismatch", "audit chain belongs to a different org");
@@ -70,6 +134,80 @@ export class AuditChainDO extends DurableObject<Env> {
     return { ok: true, entry };
   }
 
+  /**
+   * Seal this segment: no append will ever succeed again, so the returned
+   * {seq, head} is final and a successor may safely chain from it. Idempotent.
+   */
+  async seal(): Promise<{ seq: number; head: string | null }> {
+    await this.ctx.storage.put("sealed", true);
+    return {
+      seq: (await this.ctx.storage.get<number>("seq")) ?? 0,
+      head: (await this.ctx.storage.get<string>("head")) ?? null,
+    };
+  }
+
+  private async initSegment(org: string, period: string): Promise<void> {
+    if ((await this.ctx.storage.get<SegmentInit>("init")) !== undefined) return;
+
+    const dir = this.env.AUDIT_DIR.get(this.env.AUDIT_DIR.idFromName(org));
+    const latest = await dir.latest();
+
+    let basePrev: string;
+    let baseSeq: number;
+    let sealedRec: { period: string; lastSeq: number } | undefined;
+
+    if (latest === null) {
+      // First sharded segment for this org. The pre-sharding DO (if it has
+      // history) becomes the read-only "legacy" segment, in place.
+      const legacy = this.env.AUDIT_DO.get(this.env.AUDIT_DO.idFromName(org));
+      const sealed = await legacy.seal();
+      if (sealed.seq > 0 && sealed.head !== null) {
+        basePrev = sealed.head;
+        baseSeq = sealed.seq;
+        sealedRec = { period: "legacy", lastSeq: sealed.seq };
+      } else {
+        basePrev = await genesisHash(org);
+        baseSeq = 0;
+      }
+    } else if (latest.period !== period) {
+      // Never seal a NEWER segment from a stale-clocked worker: that would
+      // brick the active chain. Leave init unset; append reports stale_period
+      // and the routing service retries against the directory's latest.
+      const latestKey = latest.period === "legacy" ? "0000-00-00" : latest.period;
+      if (latestKey > period) return;
+      const name = latest.period === "legacy" ? org : `${org}:${latest.period}`;
+      const predecessor = this.env.AUDIT_DO.get(this.env.AUDIT_DO.idFromName(name));
+      const sealed = await predecessor.seal();
+      basePrev = sealed.head ?? (await genesisHash(org));
+      baseSeq = sealed.seq;
+      sealedRec = { period: latest.period, lastSeq: sealed.seq };
+    } else {
+      // Directory already lists this period (lost storage would be the only
+      // path here; recover a consistent base from the registration).
+      basePrev = (await this.ctx.storage.get<string>("head")) ?? (await genesisHash(org));
+      baseSeq = (await this.ctx.storage.get<number>("seq")) ?? latest.firstSeq - 1;
+    }
+
+    await this.ctx.storage.put<SegmentInit>("init", { period, baseSeq, basePrev });
+    await this.ctx.storage.put("org", org);
+    await this.ctx.storage.put("seq", baseSeq);
+    await this.ctx.storage.put("head", basePrev);
+    await this.ctx.storage.put("lastCheckpointSeq", baseSeq);
+    if (sealedRec) await this.ctx.storage.put("sealedPredecessor", sealedRec);
+    await this.register(org);
+  }
+
+  private async register(org: string): Promise<void> {
+    const init = (await this.ctx.storage.get<SegmentInit>("init"))!;
+    const sealedRec = await this.ctx.storage.get<{ period: string; lastSeq: number }>("sealedPredecessor");
+    const dir = this.env.AUDIT_DIR.get(this.env.AUDIT_DIR.idFromName(org));
+    await dir.advance({
+      sealed: sealedRec,
+      next: { period: init.period, firstSeq: init.baseSeq + 1 },
+    });
+    await this.ctx.storage.put("registered", true);
+  }
+
   async head(): Promise<{ seq: number; head: string | null }> {
     return {
       seq: (await this.ctx.storage.get<number>("seq")) ?? 0,
@@ -87,10 +225,11 @@ export class AuditChainDO extends DurableObject<Env> {
   }
 
   /**
-   * Hourly checkpoint: Merkle root over entries since the last checkpoint,
-   * segment archived to R2, root row inserted into D1. The DO's own
-   * checkpoint record is committed last, so a failed external write is
-   * retried on the next cron rather than leaving a gap.
+   * Checkpoint entries appended since the last checkpoint: Merkle root,
+   * segment archived to R2 (key format `audit/{org}/{from}-{to}.json` with
+   * GLOBAL seq ranges, unchanged from pre-sharding), root row inserted into
+   * D1. The DO's own checkpoint record is committed last, so a failed
+   * external write is retried on the next cron rather than leaving a gap.
    */
   async checkpoint(): Promise<DOResult<{ checkpoint: Checkpoint | null }>> {
     const org = await this.ctx.storage.get<string>("org");
@@ -153,13 +292,22 @@ export class AuditChainDO extends DurableObject<Env> {
     return { ok: true, entry, proof, checkpoint: cp };
   }
 
-  /** Recompute the whole chain — used by reconciliation and tests. */
-  async verifyChainIntegrity(): Promise<DOResult<{ seq: number; head: string | null }>> {
+  /**
+   * Recompute this segment's chain. Returns the segment's base linkage too,
+   * so services/audit.ts can verify head→prev continuity ACROSS segments.
+   */
+  async verifyChainIntegrity(): Promise<
+    DOResult<{ seq: number; head: string | null; baseSeq: number; basePrev: string | null }>
+  > {
     const org = await this.ctx.storage.get<string>("org");
-    if (!org) return { ok: true, seq: 0, head: null };
-    const seq = (await this.ctx.storage.get<number>("seq")) ?? 0;
-    let prev = await genesisHash(org);
-    for (let s = 1; s <= seq; s++) {
+    if (!org) return { ok: true, seq: 0, head: null, baseSeq: 0, basePrev: null };
+    const init = await this.ctx.storage.get<SegmentInit>("init");
+    const baseSeq = init?.baseSeq ?? 0;
+    const basePrev = init?.basePrev ?? (await genesisHash(org));
+    const seq = (await this.ctx.storage.get<number>("seq")) ?? baseSeq;
+
+    let prev = basePrev;
+    for (let s = baseSeq + 1; s <= seq; s++) {
       const entry = await this.ctx.storage.get<AuditEntry>(entryKey(s));
       if (!entry) return err("gap", `missing entry at seq ${s}`);
       if (entry.prev_hash !== prev) return err("broken_link", `prev_hash mismatch at seq ${s}`);
@@ -169,6 +317,6 @@ export class AuditChainDO extends DurableObject<Env> {
       }
       prev = entry_hash;
     }
-    return { ok: true, seq, head: prev };
+    return { ok: true, seq, head: prev, baseSeq, basePrev };
   }
 }

@@ -58,7 +58,15 @@ is not a valid transaction under UTAP.
 
 ### Audit chain
 
-Per-org, append-only, hash-chained (`src/do/audit.ts`):
+Append-only, hash-chained, and **sharded by (org, UTC day)** so a single DO never caps an org's
+transaction rate (`src/do/audit.ts`): the active segment is the DO `org:YYYY-MM-DD`, and the
+pre-sharding per-org DO is served in place as the read-only "legacy" segment. Continuity across
+segments is anchored in the predecessor: a segment's first append atomically **seals** its
+predecessor (which thereafter rejects every append) and only then chains from its final head, so
+a fork at the period boundary is impossible; sequence numbers are global and monotonic.
+`src/services/audit.ts` routes appends to the clock-derived active segment (no directory lookup
+on the hot path) and fans reads, proofs, checkpoints, and cross-segment verification out via the
+per-org `AuditDirectoryDO`. Hash format per entry:
 
 ```
 entry_hash(n) = sha256( utf8(JCS(entry minus entry_hash)) || utf8(prev_hash(n)) )
@@ -221,12 +229,14 @@ plus the published verification formulas.
   DID-to-person mapping is expected to live in a separately erasable store. Entry reads require an
   org credential; proofs and checkpoint roots are public.
 
-## Known limits and scaling paths (documented, not needed at reference scale)
+## Known limits and scaling paths (see docs/scaling.md)
 
-- A hot budget node serialises its subtree's reservations → shard into N sub-counters with fixed
-  shares, rebalanced by cron.
-- One AuditChainDO per org is a write bottleneck at high volume → shard per org per period
-  (`org:2026-Q3`) with a linking hash between shards.
+- The audit chain is sharded per (org, UTC day) with sealed-predecessor continuity —
+  implemented; finer periods drop in without format changes if one org-day is still too hot.
+- A hot budget node serialises its subtree's reservations. The `reserved` running-total counter
+  keeps each operation O(1) (with a `reconcile()` safety valve); full sub-counter sharding with
+  cron rebalancing is designed in `docs/scaling.md` and deliberately not built until measurement
+  demands it.
 
 ## Open questions (tracked from the spec)
 

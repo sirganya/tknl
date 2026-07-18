@@ -3,7 +3,7 @@ import { authenticate, type AuthContext } from "./auth";
 import { ApiError, errorJson } from "./http";
 import { withIdempotency } from "./idempotency";
 import { toMinor } from "./lib/money";
-import { auditAppend } from "./services/audit";
+import { auditAppend, checkpointOrg } from "./services/audit";
 import { handleMint, handleGetToken, handleReserve, handleRedeem, handleVoid } from "./handlers/tokens";
 import { handleIssueDelegation, handleRevokeDelegation, handleGetChain } from "./handlers/delegations";
 import { handlePutBudget, handleGetBudget, handleUpdatePolicy } from "./handlers/budgets";
@@ -16,6 +16,7 @@ export { TokenDO } from "./do/token";
 export { BudgetDO } from "./do/budget";
 export { PrincipalDO } from "./do/principal";
 export { AuditChainDO } from "./do/audit";
+export { AuditDirectoryDO } from "./do/auditDirectory";
 export { IdempotencyDO } from "./do/idempotency";
 export { ApprovalDO } from "./do/approval";
 
@@ -211,12 +212,14 @@ async function settleToken(env: Env, tid: string, org: string): Promise<void> {
   if (!audited.ok) throw new Error(`TOKEN_SETTLED audit failed: ${audited.error}`);
 }
 
-/** Hourly: per-org Merkle checkpoint into D1 + R2 (UTAP §9). */
+/** Hourly: per-org Merkle checkpoint into D1 + R2 (UTAP §9), covering every
+ * chain segment with uncheckpointed entries — including a just-sealed
+ * previous period. */
 async function runCheckpoints(env: Env): Promise<void> {
   const orgs = await env.DB.prepare("SELECT org FROM orgs").all<{ org: string }>();
   for (const { org } of orgs.results) {
-    const result = await env.AUDIT_DO.get(env.AUDIT_DO.idFromName(org)).checkpoint();
-    if (!result.ok) console.error("checkpoint failed", { org, error: result.error });
+    const result = await checkpointOrg(env, org);
+    if (!result.ok) console.error("checkpoint failed", { org, errors: result.errors });
   }
 }
 

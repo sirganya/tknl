@@ -2,6 +2,7 @@ import type { TokenDO } from "./do/token";
 import type { BudgetDO } from "./do/budget";
 import type { PrincipalDO } from "./do/principal";
 import type { AuditChainDO } from "./do/audit";
+import type { AuditDirectoryDO } from "./do/auditDirectory";
 import type { IdempotencyDO } from "./do/idempotency";
 import type { ApprovalDO } from "./do/approval";
 import type { AuditEntry } from "./types";
@@ -16,6 +17,7 @@ export interface Env {
   BUDGET_DO: DurableObjectNamespace<BudgetDO>;
   PRINCIPAL_DO: DurableObjectNamespace<PrincipalDO>;
   AUDIT_DO: DurableObjectNamespace<AuditChainDO>;
+  AUDIT_DIR: DurableObjectNamespace<AuditDirectoryDO>;
   IDEMPOTENCY_DO: DurableObjectNamespace<IdempotencyDO>;
   APPROVAL_DO: DurableObjectNamespace<ApprovalDO>;
 

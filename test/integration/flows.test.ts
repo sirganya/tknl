@@ -3,6 +3,7 @@ import { beforeAll, describe, expect, it } from "vitest";
 import { api, authHeader, bootstrapAuth, makeActor, registerActor, signDelegation, type Actor } from "../helpers";
 import { SIG_CONTEXT, verifyJcs } from "../../src/lib/crypto";
 import { verifyMerkleProof } from "../../src/lib/merkle";
+import { checkpointOrg, verifyOrgChain } from "../../src/services/audit";
 import type { AuditEntry, Token } from "../../src/types";
 
 const ORG = "acme.example";
@@ -138,13 +139,13 @@ describe("UTAP CFP end-to-end", () => {
     for (const expected of ["TOKEN_ISSUED", "TOKEN_RESERVED", "TOKEN_REDEEMED", "DELEGATION_ISSUED"]) {
       expect(events).toContain(expected);
     }
-    // Hash chain recomputes end to end inside the DO.
-    const integrity = await env.AUDIT_DO.get(env.AUDIT_DO.idFromName(ORG)).verifyChainIntegrity();
+    // Hash chain recomputes end to end, across segments.
+    const integrity = await verifyOrgChain(env, ORG);
     expect(integrity).toMatchObject({ ok: true });
 
     // -- checkpoint + public inclusion proof --------------------------------
-    const checkpoint = await env.AUDIT_DO.get(env.AUDIT_DO.idFromName(ORG)).checkpoint();
-    expect(checkpoint.ok && checkpoint.checkpoint).toBeTruthy();
+    const checkpoint = await checkpointOrg(env, ORG);
+    expect(checkpoint.ok && checkpoint.checkpoints.length > 0).toBeTruthy();
 
     const redeemEntry = (audit.body.entries as AuditEntry[]).find((e) => e.event === "TOKEN_REDEEMED")!;
     const proof = await api(`/v1/audit/${ORG}/proof/${redeemEntry.seq}`); // no auth: proofs are public

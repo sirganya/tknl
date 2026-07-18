@@ -13,6 +13,21 @@ import { purposeAllowed } from "../lib/purpose";
  * node is the single writer for its own counters so a decrement is atomic by
  * construction. Reservations carry a TTL and are swept by alarm — the release
  * half of the mint saga's compensation path.
+ *
+ * ## Scaling path: sharding a hot node (documented, deliberately NOT built)
+ *
+ * A single node serialises its subtree's reservations. When measurement shows
+ * a node's request rate is the limit, split it into N sub-counters
+ * (`{ref}#0..N-1`), each holding a fixed share of the limit. A reservation
+ * hashes its tid to a shard; on "insufficient" it may try one sibling before
+ * failing. A rebalance cron periodically moves headroom between shards
+ * (drain: lower a shard's share no further than its current spent+reserved;
+ * top up another by the drained amount, so the sum of shares never exceeds
+ * the parent limit at any instant). Costs exactness at the margin — a request
+ * can be refused while another shard still has headroom — which is the
+ * accepted trade for N× write throughput. Ancestor nodes aggregate shard
+ * totals via their own walk entries, so the tree invariant is unchanged.
+ * See docs/scaling.md.
  */
 interface Reservation {
   amountMinor: string;
@@ -184,6 +199,27 @@ export class BudgetDO extends DurableObject<Env> {
     if (nextExpiry !== null) await this.ctx.storage.setAlarm(nextExpiry);
   }
 
+  /**
+   * Safety valve: recompute the reserved total from a full reservation list
+   * and overwrite the counter if it drifted. A mismatch indicates a bug in
+   * one of the counter-maintaining paths — it is logged, not silently fixed.
+   */
+  async reconcile(): Promise<DOResult<{ counterMinor: string; computedMinor: string; matched: boolean }>> {
+    const counter = await this.reservedTotal();
+    const all = await this.ctx.storage.list<Reservation>({ prefix: "res:" });
+    let computed = 0n;
+    for (const res of all.values()) computed += BigInt(res.amountMinor);
+    const matched = counter === computed;
+    if (!matched) {
+      console.error("BUG: reserved counter drift", {
+        counter: counter.toString(),
+        computed: computed.toString(),
+      });
+      await this.setReserved(computed);
+    }
+    return { ok: true, counterMinor: counter.toString(), computedMinor: computed.toString(), matched };
+  }
+
   /** Maintained running total — O(1) instead of listing every reservation on
    * each reserve/getState, which matters on hot budget nodes. */
   private async reservedTotal(): Promise<bigint> {
@@ -191,6 +227,13 @@ export class BudgetDO extends DurableObject<Env> {
   }
 
   private async setReserved(value: bigint): Promise<void> {
+    if (value < 0n) {
+      // The counter is only ever decremented by amounts read from existing
+      // res: records, so going negative indicates a bookkeeping bug.
+      console.error("BUG: reserved counter would go negative; clamping to 0", {
+        value: value.toString(),
+      });
+    }
     await this.ctx.storage.put("reserved", (value < 0n ? 0n : value).toString());
   }
 
