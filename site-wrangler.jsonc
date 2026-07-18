@@ -1,0 +1,13 @@
+{
+  // Deploys ONLY the static explainer site in site/ as an assets-only Worker.
+  // Used by Cloudflare Workers Builds (deploy command:
+  //   npx wrangler deploy --config site-wrangler.jsonc
+  // ). The CFP reference Worker itself lives in wrangler.jsonc and needs its
+  // queue/D1/R2/KV resources provisioned before it can deploy.
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "tknl",
+  "compatibility_date": "2025-09-06",
+  "assets": {
+    "directory": "site"
+  }
+}
