@@ -1,0 +1,462 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>UTAP — a payment protocol for AI agents</title>
+<meta name="description" content="UTAP v0.1: delegated agent payments with double-spend prevention, human accountability, and a tamper-evident audit trail. Reference CFP implementation on Cloudflare Workers.">
+<style>
+  :root {
+    --bg: #faf9f6;
+    --surface: #ffffff;
+    --ink: #1a1e24;
+    --muted: #5c6470;
+    --line: #e4e1da;
+    --accent: #0d5c4d;
+    --accent-soft: #e3efec;
+    --code-bg: #14181d;
+    --code-ink: #d6dde6;
+    --warn-bg: #fdf3e3;
+    --warn-line: #ecd9b0;
+    --mono: ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #101418;
+      --surface: #171c22;
+      --ink: #e8e6e1;
+      --muted: #9aa3ad;
+      --line: #2a313a;
+      --accent: #58b39e;
+      --accent-soft: #1b2b27;
+      --code-bg: #0c0f13;
+      --code-ink: #cdd5de;
+      --warn-bg: #241d10;
+      --warn-line: #4a3a1c;
+    }
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; scroll-padding-top: 4.5rem; }
+  body {
+    margin: 0;
+    font: 17px/1.65 "Seravek", "Gill Sans Nova", "Segoe UI", ui-sans-serif, system-ui, sans-serif;
+    background: var(--bg);
+    color: var(--ink);
+    -webkit-font-smoothing: antialiased;
+  }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+
+  nav {
+    position: sticky; top: 0; z-index: 10;
+    background: color-mix(in srgb, var(--bg) 88%, transparent);
+    backdrop-filter: blur(8px);
+    border-bottom: 1px solid var(--line);
+  }
+  .nav-inner {
+    max-width: 68rem; margin: 0 auto; padding: 0.7rem 1.25rem;
+    display: flex; align-items: baseline; gap: 1.4rem; flex-wrap: wrap;
+  }
+  .nav-inner .brand { font-weight: 700; letter-spacing: 0.04em; color: var(--ink); }
+  .nav-inner a:not(.brand) { color: var(--muted); font-size: 0.88rem; }
+  .nav-inner a:hover { color: var(--accent); text-decoration: none; }
+
+  header.hero {
+    max-width: 68rem; margin: 0 auto; padding: 5rem 1.25rem 3.5rem;
+  }
+  .hero .kicker {
+    font-size: 0.8rem; letter-spacing: 0.14em; text-transform: uppercase;
+    color: var(--accent); font-weight: 600;
+  }
+  .hero h1 {
+    font-size: clamp(2rem, 5vw, 3.1rem); line-height: 1.12;
+    margin: 0.5rem 0 1rem; letter-spacing: -0.015em; max-width: 46rem;
+  }
+  .hero p.lede { font-size: 1.18rem; color: var(--muted); max-width: 42rem; margin: 0 0 1.8rem; }
+  .hero .actions { display: flex; gap: 0.8rem; flex-wrap: wrap; }
+  .btn {
+    display: inline-block; padding: 0.6rem 1.15rem; border-radius: 8px;
+    font-weight: 600; font-size: 0.95rem; border: 1px solid var(--accent);
+  }
+  .btn.primary { background: var(--accent); color: #fff; }
+  .btn.primary:hover { text-decoration: none; filter: brightness(1.08); }
+  .btn.ghost { color: var(--accent); }
+  .btn.ghost:hover { background: var(--accent-soft); text-decoration: none; }
+
+  main { max-width: 68rem; margin: 0 auto; padding: 0 1.25rem 5rem; }
+  section { margin: 3.6rem 0; scroll-margin-top: 4.5rem; }
+  h2 {
+    font-size: 1.65rem; letter-spacing: -0.01em; margin: 0 0 0.4rem;
+  }
+  h2 + p.sub { color: var(--muted); margin-top: 0; max-width: 44rem; }
+  h3 { font-size: 1.12rem; margin: 1.6rem 0 0.4rem; }
+  p { max-width: 44rem; }
+
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr)); gap: 1rem; margin-top: 1.4rem; }
+  .card {
+    background: var(--surface); border: 1px solid var(--line); border-radius: 12px;
+    padding: 1.1rem 1.2rem;
+  }
+  .card h4 { margin: 0 0 0.35rem; font-size: 1rem; }
+  .card p { margin: 0; font-size: 0.92rem; color: var(--muted); }
+
+  pre {
+    background: var(--code-bg); color: var(--code-ink);
+    border-radius: 10px; padding: 1rem 1.2rem; overflow-x: auto;
+    font-family: var(--mono); font-size: 0.84rem; line-height: 1.55;
+  }
+  code { font-family: var(--mono); font-size: 0.88em; }
+  p code, li code, td code {
+    background: var(--accent-soft); color: var(--accent);
+    padding: 0.08em 0.35em; border-radius: 5px;
+  }
+
+  .tablewrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 10px; margin-top: 1rem; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.9rem; background: var(--surface); }
+  th, td { text-align: left; padding: 0.55rem 0.9rem; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.07em; color: var(--muted); }
+  tr:last-child td { border-bottom: none; }
+
+  .figure {
+    background: var(--surface); border: 1px solid var(--line); border-radius: 12px;
+    padding: 1.4rem; margin: 1.4rem 0; overflow-x: auto;
+  }
+  .figure svg { display: block; margin: 0 auto; max-width: 100%; height: auto; }
+  .figure figcaption { font-size: 0.85rem; color: var(--muted); text-align: center; margin-top: 0.8rem; }
+
+  .steps { counter-reset: step; list-style: none; padding: 0; margin: 1.4rem 0 0; max-width: 46rem; }
+  .steps li {
+    counter-increment: step; position: relative; padding: 0 0 1.3rem 3.1rem;
+  }
+  .steps li::before {
+    content: counter(step);
+    position: absolute; left: 0; top: 0.05rem;
+    width: 1.9rem; height: 1.9rem; border-radius: 50%;
+    background: var(--accent-soft); color: var(--accent);
+    display: grid; place-items: center; font-weight: 700; font-size: 0.9rem;
+  }
+  .steps li:not(:last-child)::after {
+    content: ""; position: absolute; left: 0.93rem; top: 2.2rem; bottom: 0.2rem;
+    width: 2px; background: var(--line);
+  }
+  .steps b { display: block; }
+  .steps span { color: var(--muted); font-size: 0.93rem; }
+
+  .callout {
+    border: 1px solid var(--warn-line); background: var(--warn-bg);
+    border-radius: 10px; padding: 0.9rem 1.1rem; font-size: 0.93rem; max-width: 46rem;
+  }
+  .callout b { display: block; margin-bottom: 0.15rem; }
+
+  footer {
+    border-top: 1px solid var(--line); color: var(--muted);
+    font-size: 0.85rem; padding: 2rem 1.25rem 3rem;
+  }
+  .footer-inner { max-width: 68rem; margin: 0 auto; display: flex; justify-content: space-between; gap: 1rem; flex-wrap: wrap; }
+
+  .svg-ink   { fill: var(--ink); }
+  .svg-muted { fill: var(--muted); }
+  .svg-line  { stroke: var(--muted); fill: none; }
+  .svg-box   { fill: var(--surface); stroke: var(--line); }
+  .svg-box-accent { fill: var(--accent-soft); stroke: var(--accent); }
+  .svg-accent-ink { fill: var(--accent); }
+  text { font-family: inherit; }
+  .svg-mono { font-family: var(--mono); }
+</style>
+</head>
+<body>
+
+<nav>
+  <div class="nav-inner">
+    <a class="brand" href="#top">UTAP</a>
+    <a href="#how">How it works</a>
+    <a href="#double-spend">Double-spend</a>
+    <a href="#delegation">Delegation</a>
+    <a href="#budgets">Budgets</a>
+    <a href="#audit">Audit trail</a>
+    <a href="#architecture">Architecture</a>
+    <a href="#api">API</a>
+    <a href="#start">Get started</a>
+  </div>
+</nav>
+
+<header class="hero" id="top">
+  <div class="kicker">UTAP v0.1 · CFP reference implementation</div>
+  <h1>A payment protocol for AI agents that humans stay accountable for</h1>
+  <p class="lede">
+    UTAP lets a human principal delegate bounded spending authority to software agents —
+    with cryptographic delegation chains, hierarchical budgets, purpose-bound tokens,
+    platform-level double-spend prevention, and an audit trail that stays verifiable
+    even if the operator turns adversarial.
+  </p>
+  <div class="actions">
+    <a class="btn primary" href="https://github.com/sirganya/tknl">View the code</a>
+    <a class="btn ghost" href="#start">Run it locally</a>
+  </div>
+</header>
+
+<main>
+
+<section id="what">
+  <h2>What this is</h2>
+  <p class="sub">A working reference implementation of the <strong>Central Financial Provider (CFP)</strong> role defined in UTAP&nbsp;v0.1, built on Cloudflare Workers.</p>
+  <p>
+    The CFP is the party that mints spend tokens, verifies delegation chains, enforces budgets,
+    prevents double-spends, and keeps the audit ledger. This implementation exists to prove the
+    protocol runs, to give implementers something to test against, and to serve as the technical
+    basis for a production or sovereign-operated CFP.
+  </p>
+  <div class="cards">
+    <div class="card"><h4>In scope</h4><p>Token lifecycle, double-spend prevention, delegation chain verification, budget enforcement, purpose binding, hash-chained audit trail, public verification API.</p></div>
+    <div class="card"><h4>Out of scope (v0.1)</h4><p>Real funds, fiat settlement, MiCA-regulated e-money issuance, KYC/AML. The reference settles against a mock ledger behind a clean boundary where a licensed institution's rails can attach.</p></div>
+    <div class="card"><h4>Design constraints</h4><p>Single-writer correctness for anything touching value. Append-only, independently verifiable audit. Every value operation traces to a human principal. Edge latency, no regional primary database.</p></div>
+  </div>
+</section>
+
+<section id="how">
+  <h2>How a payment flows</h2>
+  <p class="sub">One token, one purpose, one redemption — every step audited.</p>
+  <ol class="steps">
+    <li><b>Delegate</b><span>A human principal signs a delegation credential granting an agent bounded authority: maximum amount, allowed purposes, permitted budgets, and how far it may sub-delegate. Chains of credentials extend authority agent-to-agent; the root is always a person.</span></li>
+    <li><b>Mint</b><span>The agent requests a token — e.g. €40,000 for <code>COMPUTE.INFERENCE</code>. The CFP verifies the whole chain, atomically reserves the amount against the budget hierarchy, signs the token, and appends <code>TOKEN_ISSUED</code> to the audit chain. Above a policy threshold, minting pauses until a human approves with their own key.</span></li>
+    <li><b>Reserve</b><span>The merchant presents the token reference plus its own authentication. The token binds to that merchant — this is the anti-replay step. Any other merchant is now rejected.</span></li>
+    <li><b>Redeem</b><span>Purpose constraints (merchant allow-list, category codes) are checked, the reservation converts to spend at every budget level, and <code>TOKEN_REDEEMED</code> is appended — synchronously. If the audit append fails, the redemption is rolled back: an unauditable transaction is not a valid transaction.</span></li>
+    <li><b>Settle</b><span>Asynchronous and batched. The reference writes a mock ledger; in production this is where a licensed institution's payment rails attach without touching protocol logic.</span></li>
+  </ol>
+  <h3>The URI is a bearer reference, not the token</h3>
+  <pre>https://vendor.example/pay?utap_v=0.1
+  &amp;utap_tid=utap_01HQ…        ← token id (ULID)
+  &amp;utap_cfp=cfp.example.ie     ← issuing CFP
+  &amp;utap_sig=ed25519:…          ← CFP signature</pre>
+  <p>
+    Only the identifier, CFP, version and signature travel in the URI. Full token state is fetched
+    from the CFP under merchant authentication — so URIs stay short, purpose and principal data
+    never leak through referrer headers or logs, and a stolen URI is useless on its own.
+  </p>
+</section>
+
+<section id="double-spend">
+  <h2>Double-spend prevention by construction</h2>
+  <p class="sub">One Durable Object per token. Single-threaded. No distributed lock, no consensus protocol, no central database.</p>
+  <p>
+    Each token lives in its own Durable Object, addressed by token id. The platform serialises
+    all access to it, so concurrent redemption attempts queue up and the state machine simply
+    rejects any transition that isn't legal from the current state. Double-spend prevention is a
+    property of the platform, not something rebuilt on optimistic locking.
+  </p>
+  <figure class="figure">
+    <svg viewBox="0 0 760 190" width="760" height="190" role="img" aria-label="Token state machine: issued to reserved to redeemed to settled, with void and expired branches">
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" class="svg-muted"/>
+        </marker>
+      </defs>
+      <g font-size="15" text-anchor="middle">
+        <rect x="20"  y="45" width="120" height="44" rx="10" class="svg-box-accent"/>
+        <text x="80"  y="72" class="svg-accent-ink svg-mono">issued</text>
+        <rect x="210" y="45" width="120" height="44" rx="10" class="svg-box-accent"/>
+        <text x="270" y="72" class="svg-accent-ink svg-mono">reserved</text>
+        <rect x="400" y="45" width="120" height="44" rx="10" class="svg-box-accent"/>
+        <text x="460" y="72" class="svg-accent-ink svg-mono">redeemed</text>
+        <rect x="590" y="45" width="120" height="44" rx="10" class="svg-box-accent"/>
+        <text x="650" y="72" class="svg-accent-ink svg-mono">settled</text>
+        <rect x="210" y="135" width="120" height="40" rx="10" class="svg-box"/>
+        <text x="270" y="160" class="svg-muted svg-mono">void</text>
+        <rect x="20" y="135" width="120" height="40" rx="10" class="svg-box"/>
+        <text x="80" y="160" class="svg-muted svg-mono">expired</text>
+      </g>
+      <g class="svg-line" stroke-width="1.6" marker-end="url(#arr)">
+        <line x1="140" y1="67" x2="205" y2="67"/>
+        <line x1="330" y1="67" x2="395" y2="67"/>
+        <line x1="520" y1="67" x2="585" y2="67"/>
+        <line x1="80"  y1="89" x2="80"  y2="130"/>
+        <line x1="270" y1="89" x2="270" y2="130"/>
+        <line x1="120" y1="89" x2="240" y2="132"/>
+        <line x1="230" y1="89" x2="110" y2="132"/>
+      </g>
+    </svg>
+    <figcaption>A token is redeemed at most once, globally. The integration suite fires five concurrent redeems — exactly one succeeds.</figcaption>
+  </figure>
+</section>
+
+<section id="delegation">
+  <h2>Delegation chains rooted in a human</h2>
+  <p class="sub">Authority flows person → agent → agent, and narrows at every hop.</p>
+  <p>Verification of a chain checks, at every hop:</p>
+  <div class="cards">
+    <div class="card"><h4>Human root</h4><p>The root credential must be issued by a person DID, never an agent. Every value operation traces to a human principal.</p></div>
+    <div class="card"><h4>Continuity &amp; signatures</h4><p>Ed25519 over canonical JSON (RFC 8785). Each hop's issuer must be the previous hop's delegate.</p></div>
+    <div class="card"><h4>Most restrictive wins</h4><p>The effective scope is the intersection across the chain: minimum amount, purposes that match every hop, budgets allowed by every hop, depth within every hop's limit.</p></div>
+    <div class="card"><h4>Live revocation</h4><p>Each principal's Durable Object is the single writer for its revocation list — revocation is immediate and consistent, not eventually propagated.</p></div>
+  </div>
+  <h3>A delegation credential</h3>
+  <pre>{
+  "iss": "did:web:acme.example:person:gkavanagh",   // delegator (human root)
+  "sub": "did:web:acme.example:agent:procure-01",   // delegate
+  "scope": {
+    "max_amount": "50000.00", "ccy": "EUR",
+    "purposes": ["COMPUTE.*", "DATA.LICENSE"],
+    "budget_refs": ["bud_acme_eng_q3"],
+    "max_depth": 2                                  // further sub-delegations allowed
+  },
+  "nbf": 1749000000, "exp": 1756000000,
+  "jti": "dlg_01HQ…",
+  "sig": "ed25519:…"                                // signed by the delegator's key
+}</pre>
+</section>
+
+<section id="budgets">
+  <h2>Hierarchical budgets, atomic enforcement</h2>
+  <p class="sub">org → division → team → project, each node an atomic counter.</p>
+  <p>
+    Reservations walk from the leaf budget to the root, reserving at each level; if any ancestor
+    rejects, everything already reserved in the walk is released. The walk order is always
+    leaf-to-root, giving a consistent lock ordering with no deadlock between concurrent requests
+    on overlapping subtrees. Policy is enforced at every node the walk passes: purpose allow-lists,
+    per-transaction caps, budget periods.
+  </p>
+  <p>
+    <strong>The CFO hook:</strong> <code>requires_human_approval_above</code>. A mint that crosses
+    the threshold emits an approval request instead of a token — the token is only minted on an
+    approval credential signed by the human principal's own key. This is a protocol-level control,
+    not a UI convention.
+  </p>
+  <p>
+    Reservations carry a TTL and are swept by alarms, so a crashed process can never leak a hold
+    forever. A daily reconciliation job recomputes each budget's spend from the audit chain and
+    compares it to the live counter — divergence is a P1: it means either a bug or tampering.
+  </p>
+</section>
+
+<section id="audit">
+  <h2>An audit trail you don't have to trust</h2>
+  <p class="sub">Hash-chained, Merkle-checkpointed, externally verifiable — designed for an adversarial future operator.</p>
+  <p>
+    Every value operation appends an entry to a per-organisation hash chain,
+    <em>synchronously, in the critical path</em>. Each entry commits to everything before it:
+  </p>
+  <pre>entry_hash(n) = SHA-256( JCS(entry minus entry_hash) || prev_hash(n) )
+prev_hash(n)  = entry_hash(n-1)          // genesis: fixed org-scoped seed</pre>
+  <p>
+    Any mutation or deletion of history breaks every subsequent hash. Hourly checkpoints compute a
+    Merkle root over new entries, archive the segment to immutable storage, and expose public
+    endpoints:
+  </p>
+  <pre>GET /v1/audit/{org}/proof/{seq}      → Merkle inclusion proof + checkpoint root
+GET /v1/audit/{org}/checkpoints      → published roots</pre>
+  <p>
+    Given a published root, an external auditor verifies any entry's inclusion without trusting
+    the CFP's word. The threat model is explicit: the CFP is trusted for validation, but must not
+    need to be trusted for honesty about history.
+  </p>
+  <div class="callout">
+    <b>For a sovereign CFP</b>
+    External anchoring of checkpoint roots (a transparency log or notarised feed) should be
+    mandatory, not optional — it is what makes the audit trail credible against the operator itself.
+  </div>
+</section>
+
+<section id="architecture">
+  <h2>Why Cloudflare</h2>
+  <p class="sub">The protocol's hard requirement is strongly consistent, serialised state per token and per budget — reachable globally at edge latency.</p>
+  <p>
+    Durable Objects give exactly that: a single-threaded, strongly consistent actor addressable by
+    id, with transactional storage. There is deliberately <strong>no external primary database</strong> —
+    introducing one would reintroduce a regional bottleneck and a consistency boundary the DO model
+    already solves. D1 and R2 hold only derived views, rebuildable from the audit chain.
+  </p>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>Concern</th><th>Primitive</th><th>Rationale</th></tr></thead>
+      <tbody>
+        <tr><td>API edge, authn, routing</td><td>Workers</td><td>Global, low latency, no origin</td></tr>
+        <tr><td>Token state, double-spend</td><td>Durable Object per token</td><td>Serialised single-writer; no race by construction</td></tr>
+        <tr><td>Budget counters</td><td>Durable Object per budget node</td><td>Atomic hierarchical decrement</td></tr>
+        <tr><td>Delegation &amp; revocation</td><td>Durable Object per principal</td><td>Consistent revocation state</td></tr>
+        <tr><td>Audit ledger</td><td>Durable Object per org</td><td>Append-only hash chain, single writer</td></tr>
+        <tr><td>Queryable audit index</td><td>D1</td><td>Derived, rebuildable; reporting and joins</td></tr>
+        <tr><td>Audit archive</td><td>R2</td><td>Cheap immutable segments per checkpoint</td></tr>
+        <tr><td>Async fan-out</td><td>Queues</td><td>Keeps indexing/settlement off the hot path</td></tr>
+        <tr><td>Key &amp; config cache</td><td>Workers KV</td><td>Read-heavy; eventual consistency is fine here</td></tr>
+        <tr><td>Checkpoints, reconciliation</td><td>Cron Triggers</td><td>Scheduled integrity jobs</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <h3>Known limits — documented, with scaling paths</h3>
+  <p>
+    A hot budget node serialises its subtree's reservations (shard into sub-counters with fixed
+    shares when measurement demands it). One audit chain per org is a write bottleneck at very
+    high volume (shard per org per period with a linking hash). Neither is needed at reference
+    scale; both are designed for.
+  </p>
+</section>
+
+<section id="api">
+  <h2>API surface</h2>
+  <p class="sub">Every mutating request carries an idempotency key — replays return the original response.</p>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>Method</th><th>Path</th><th>Purpose</th></tr></thead>
+      <tbody>
+        <tr><td><code>POST</code></td><td><code>/v1/tokens</code></td><td>Mint token (agent credential + delegation chain)</td></tr>
+        <tr><td><code>GET</code></td><td><code>/v1/tokens/{tid}</code></td><td>Token state (authorised parties only)</td></tr>
+        <tr><td><code>POST</code></td><td><code>/v1/tokens/{tid}/reserve</code></td><td>Merchant hold — binds token to merchant</td></tr>
+        <tr><td><code>POST</code></td><td><code>/v1/tokens/{tid}/redeem</code></td><td>Merchant redemption</td></tr>
+        <tr><td><code>POST</code></td><td><code>/v1/tokens/{tid}/void</code></td><td>Cancel unredeemed token</td></tr>
+        <tr><td><code>POST</code></td><td><code>/v1/delegations</code></td><td>Register delegator-signed credential</td></tr>
+        <tr><td><code>DELETE</code></td><td><code>/v1/delegations/{jti}</code></td><td>Revoke — immediate and consistent</td></tr>
+        <tr><td><code>GET</code></td><td><code>/v1/delegations/{jti}/chain</code></td><td>Resolve and verify chain</td></tr>
+        <tr><td><code>PUT</code>/<code>GET</code></td><td><code>/v1/budgets/{ref}</code></td><td>Configure / read budget node</td></tr>
+        <tr><td><code>POST</code></td><td><code>/v1/budgets/{ref}/policy</code></td><td>Update policy (human principal only)</td></tr>
+        <tr><td><code>POST</code></td><td><code>/v1/approvals/{id}</code></td><td>Human approval for above-threshold spend</td></tr>
+        <tr><td><code>GET</code></td><td><code>/v1/audit/{org}/entries</code></td><td>Audit query (org credential)</td></tr>
+        <tr><td><code>GET</code></td><td><code>/v1/audit/{org}/proof/{seq}</code></td><td>Merkle inclusion proof (public)</td></tr>
+        <tr><td><code>GET</code></td><td><code>/.well-known/utap-cfp.json</code></td><td>CFP metadata &amp; supported versions</td></tr>
+        <tr><td><code>GET</code></td><td><code>/.well-known/jwks.json</code></td><td>CFP public keys</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section id="start">
+  <h2>Run it yourself</h2>
+  <p class="sub">35 unit and integration tests run against the real Workers runtime; the demo drives the whole protocol through the public API.</p>
+  <pre>git clone https://github.com/sirganya/tknl && cd tknl
+npm install
+npm test                     # unit + integration in workerd
+
+node scripts/genkey.mjs      # generate a CFP signing key
+cp .dev.vars.example .dev.vars
+npm run dev                  # CFP on :8787
+
+npm run demo                 # separate terminal: full lifecycle,
+                             # double-spend rejection, audit verification</pre>
+  <p>
+    The demo plays three parties — a human principal, a procurement agent, and a mock vendor —
+    through keys, budgets, delegation, mint, reserve and redeem, then independently re-verifies
+    the audit hash chain from its genesis seed. The double-spend attempt fails with
+    <code>invalid_transition</code>, every time.
+  </p>
+</section>
+
+<section id="open">
+  <h2>Open questions, held openly</h2>
+  <div class="cards">
+    <div class="card"><h4>GDPR vs immutability</h4><p>Pseudonymous DIDs in the chain, erasable identity mapping outside it. Flagged as an open legal question, not a solved one.</p></div>
+    <div class="card"><h4>Settlement medium</h4><p>MiCA e-money tokens, commercial bank money, or pure validation-and-audit? The choice determines licensing — and who can operate a CFP.</p></div>
+    <div class="card"><h4>Multi-CFP interop</h4><p>Cross-CFP redemption and chain verification is out of scope for v0.1 — and is what turns a product into a standard.</p></div>
+    <div class="card"><h4>Anchoring target</h4><p>Checkpoint roots need an external anchor that is credible, durable, and jurisdictionally neutral.</p></div>
+  </div>
+</section>
+
+</main>
+
+<footer>
+  <div class="footer-inner">
+    <div>UTAP v0.1 · CFP reference implementation · Quickpoint Teoranta</div>
+    <div><a href="https://github.com/sirganya/tknl">github.com/sirganya/tknl</a></div>
+  </div>
+</footer>
+
+</body>
+</html>

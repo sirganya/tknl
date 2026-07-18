@@ -154,6 +154,19 @@ The demo registers keys, configures a budget hierarchy, issues a delegation, min
 token, reserves and redeems it as the vendor, proves the double-spend rejection, and then
 re-verifies the audit hash chain from genesis — entirely through the public API.
 
+## Website
+
+`site/` is a static one-page explainer of the protocol and this implementation, built for
+Cloudflare Pages (no build step — plain HTML/CSS, light/dark aware, responsive).
+
+```sh
+npx wrangler login          # once
+npm run site:deploy         # deploys site/ to the utap-cfp Pages project
+```
+
+Alternatively connect the repo to Pages in the Cloudflare dashboard (Workers & Pages → Create →
+Pages → connect to Git) with build output directory `site` and no build command.
+
 ### Deploying
 
 1. Create the resources: `wrangler d1 create utap-audit-index`, `wrangler r2 bucket create
