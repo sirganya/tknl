@@ -1,0 +1,23 @@
+{
+  "name": "utap-cfp-reference",
+  "version": "0.1.0",
+  "private": true,
+  "description": "UTAP v0.1 Central Financial Provider (CFP) reference implementation on Cloudflare Workers",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "genkey": "node scripts/genkey.mjs",
+    "demo": "node scripts/demo.mjs"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "^0.8.19",
+    "@cloudflare/workers-types": "^4.20250906.0",
+    "typescript": "^5.5.4",
+    "vitest": "~3.2.0",
+    "wrangler": "4.35.0"
+  }
+}

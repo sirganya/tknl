@@ -1,0 +1,185 @@
+import { DurableObject } from "cloudflare:workers";
+import type { Env } from "../env";
+import type { BudgetConfig, BudgetState, DOResult } from "../types";
+import { err } from "../types";
+import { fromMinor, toMinor } from "../lib/money";
+import { purposeAllowed } from "../lib/purpose";
+
+/**
+ * BudgetDO — one per budget node, addressed by idFromName(budget_ref).
+ *
+ * Nodes form a tree (org → division → team → project). The Worker orchestrates
+ * a leaf-to-root reservation walk (consistent lock ordering, UTAP §7); each
+ * node is the single writer for its own counters so a decrement is atomic by
+ * construction. Reservations carry a TTL and are swept by alarm — the release
+ * half of the mint saga's compensation path.
+ */
+interface Reservation {
+  amountMinor: string;
+  expiresAtMs: number;
+}
+
+export interface ReserveArgs {
+  tid: string;
+  amountMinor: string;
+  ccy: string;
+  purposeCode: string;
+  expiresAtMs: number;
+}
+
+export class BudgetDO extends DurableObject<Env> {
+  async configure(cfg: BudgetConfig): Promise<DOResult> {
+    let limitMinor: bigint;
+    try {
+      limitMinor = toMinor(cfg.limit, cfg.ccy);
+    } catch (e) {
+      return err("bad_limit", String(e));
+    }
+    if (limitMinor < 0n) return err("bad_limit", "limit must be non-negative");
+    const existing = await this.ctx.storage.get<BudgetConfig>("cfg");
+    if (existing && existing.ccy !== cfg.ccy) {
+      return err("ccy_change", "cannot change a budget's currency");
+    }
+    await this.ctx.storage.put("cfg", cfg);
+    if ((await this.ctx.storage.get("spent")) === undefined) {
+      await this.ctx.storage.put("spent", "0");
+    }
+    return { ok: true };
+  }
+
+  async updatePolicy(policy: BudgetConfig["policy"]): Promise<DOResult> {
+    const cfg = await this.ctx.storage.get<BudgetConfig>("cfg");
+    if (!cfg) return err("not_found", "budget not configured");
+    await this.ctx.storage.put("cfg", { ...cfg, policy });
+    return { ok: true };
+  }
+
+  async getState(): Promise<DOResult<{ budget: BudgetState }>> {
+    const cfg = await this.ctx.storage.get<BudgetConfig>("cfg");
+    if (!cfg) return err("not_found", "budget not configured");
+    const spent = BigInt((await this.ctx.storage.get<string>("spent")) ?? "0");
+    const reserved = await this.reservedTotal();
+    const limit = toMinor(cfg.limit, cfg.ccy);
+    const available = limit - spent - reserved;
+    return {
+      ok: true,
+      budget: {
+        ...cfg,
+        spent: fromMinor(spent, cfg.ccy),
+        reserved: fromMinor(reserved, cfg.ccy),
+        available: fromMinor(available < 0n ? 0n : available, cfg.ccy),
+      },
+    };
+  }
+
+  /**
+   * Atomically reserve funds for a token. Policy (purpose allow-list,
+   * per-transaction cap, period) is enforced at every node it passes through.
+   * Re-reserving the same tid with the same amount is an idempotent no-op.
+   */
+  async reserve(args: ReserveArgs): Promise<DOResult<{ availableAfter: string }>> {
+    const cfg = await this.ctx.storage.get<BudgetConfig>("cfg");
+    if (!cfg) return err("not_found", "budget not configured");
+    if (cfg.ccy !== args.ccy) return err("ccy_mismatch", `budget is ${cfg.ccy}, token is ${args.ccy}`);
+
+    const amount = BigInt(args.amountMinor);
+    if (amount <= 0n) return err("bad_amount", "reservation must be positive");
+
+    const today = new Date().toISOString().slice(0, 10);
+    if (today < cfg.period.start || today > cfg.period.end) {
+      return err("out_of_period", `budget period ${cfg.period.start}..${cfg.period.end} does not cover today`);
+    }
+    if (cfg.policy.purposes_allow && !purposeAllowed(cfg.policy.purposes_allow, args.purposeCode)) {
+      return err("purpose_not_allowed", `budget policy does not permit purpose ${args.purposeCode}`);
+    }
+    if (cfg.policy.per_txn_max && amount > toMinor(cfg.policy.per_txn_max, cfg.ccy)) {
+      return err("per_txn_max", `amount exceeds per-transaction cap ${cfg.policy.per_txn_max}`);
+    }
+
+    const existing = await this.ctx.storage.get<Reservation>(`res:${args.tid}`);
+    if (existing) {
+      if (existing.amountMinor !== args.amountMinor) {
+        return err("reservation_conflict", `tid ${args.tid} already reserved with a different amount`);
+      }
+      const spent0 = BigInt((await this.ctx.storage.get<string>("spent")) ?? "0");
+      const avail0 = toMinor(cfg.limit, cfg.ccy) - spent0 - (await this.reservedTotal());
+      return { ok: true, availableAfter: fromMinor(avail0 < 0n ? 0n : avail0, cfg.ccy) };
+    }
+
+    const spent = BigInt((await this.ctx.storage.get<string>("spent")) ?? "0");
+    const reserved = await this.reservedTotal();
+    const limit = toMinor(cfg.limit, cfg.ccy);
+    if (spent + reserved + amount > limit) {
+      return err("insufficient_budget", `available ${fromMinor(limit - spent - reserved, cfg.ccy)}, requested ${fromMinor(amount, cfg.ccy)}`);
+    }
+
+    await this.ctx.storage.put<Reservation>(`res:${args.tid}`, {
+      amountMinor: args.amountMinor,
+      expiresAtMs: args.expiresAtMs,
+    });
+    await this.scheduleSweep(args.expiresAtMs);
+    const available = limit - spent - reserved - amount;
+    return { ok: true, availableAfter: fromMinor(available, cfg.ccy) };
+  }
+
+  /** Convert a reservation into spend (redeem step 4). */
+  async commit(tid: string): Promise<DOResult<{ availableAfter: string; spentAfter: string }>> {
+    const cfg = await this.ctx.storage.get<BudgetConfig>("cfg");
+    if (!cfg) return err("not_found", "budget not configured");
+    const res = await this.ctx.storage.get<Reservation>(`res:${tid}`);
+    if (!res) return err("no_reservation", `no reservation for ${tid}`);
+    const spent = BigInt((await this.ctx.storage.get<string>("spent")) ?? "0") + BigInt(res.amountMinor);
+    await this.ctx.storage.delete(`res:${tid}`);
+    await this.ctx.storage.put("spent", spent.toString());
+    const available = toMinor(cfg.limit, cfg.ccy) - spent - (await this.reservedTotal());
+    return {
+      ok: true,
+      availableAfter: fromMinor(available < 0n ? 0n : available, cfg.ccy),
+      spentAfter: fromMinor(spent, cfg.ccy),
+    };
+  }
+
+  /** Release a reservation. Idempotent — releasing a missing tid is a no-op. */
+  async release(tid: string): Promise<DOResult> {
+    await this.ctx.storage.delete(`res:${tid}`);
+    return { ok: true };
+  }
+
+  /** Compensation: undo a commit (only used when a later saga step failed). */
+  async uncommit(tid: string, amountMinor: string, expiresAtMs: number): Promise<DOResult> {
+    const spent = BigInt((await this.ctx.storage.get<string>("spent")) ?? "0") - BigInt(amountMinor);
+    await this.ctx.storage.put("spent", (spent < 0n ? 0n : spent).toString());
+    await this.ctx.storage.put<Reservation>(`res:${tid}`, { amountMinor, expiresAtMs });
+    await this.scheduleSweep(expiresAtMs);
+    return { ok: true };
+  }
+
+  /** Expiry sweep: drop lapsed reservations, reschedule for the next one. */
+  async alarm(): Promise<void> {
+    const now = Date.now();
+    const all = await this.ctx.storage.list<Reservation>({ prefix: "res:" });
+    let nextExpiry: number | null = null;
+    for (const [key, res] of all) {
+      if (res.expiresAtMs <= now) {
+        await this.ctx.storage.delete(key);
+      } else if (nextExpiry === null || res.expiresAtMs < nextExpiry) {
+        nextExpiry = res.expiresAtMs;
+      }
+    }
+    if (nextExpiry !== null) await this.ctx.storage.setAlarm(nextExpiry);
+  }
+
+  private async reservedTotal(): Promise<bigint> {
+    const all = await this.ctx.storage.list<Reservation>({ prefix: "res:" });
+    let total = 0n;
+    for (const res of all.values()) total += BigInt(res.amountMinor);
+    return total;
+  }
+
+  private async scheduleSweep(candidateMs: number): Promise<void> {
+    const current = await this.ctx.storage.getAlarm();
+    if (current === null || candidateMs < current) {
+      await this.ctx.storage.setAlarm(candidateMs);
+    }
+  }
+}

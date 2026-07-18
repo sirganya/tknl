@@ -1,0 +1,79 @@
+{
+  // UTAP CFP reference implementation — Cloudflare Workers configuration.
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "utap-cfp-reference",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-09-06",
+  "compatibility_flags": ["nodejs_compat"],
+
+  "vars": {
+    // Issuing CFP identity, embedded in every token (`cfp` field).
+    "CFP_ID": "cfp.example.ie",
+    "ENVIRONMENT": "development"
+  },
+
+  // Secrets (set via `wrangler secret put` / .dev.vars):
+  //   CFP_SIGNING_KEY  — JSON JWK (OKP/Ed25519, private) used to sign tokens
+  //   BOOTSTRAP_TOKEN  — bearer token guarding bootstrap/admin endpoints
+
+  "durable_objects": {
+    "bindings": [
+      { "name": "TOKEN_DO", "class_name": "TokenDO" },
+      { "name": "BUDGET_DO", "class_name": "BudgetDO" },
+      { "name": "PRINCIPAL_DO", "class_name": "PrincipalDO" },
+      { "name": "AUDIT_DO", "class_name": "AuditChainDO" },
+      { "name": "IDEMPOTENCY_DO", "class_name": "IdempotencyDO" },
+      { "name": "APPROVAL_DO", "class_name": "ApprovalDO" }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": [
+        "TokenDO",
+        "BudgetDO",
+        "PrincipalDO",
+        "AuditChainDO",
+        "IdempotencyDO",
+        "ApprovalDO"
+      ]
+    }
+  ],
+
+  // D1 is a derived index over the audit chain — never the source of truth.
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "utap-audit-index",
+      "database_id": "00000000-0000-0000-0000-000000000000",
+      "migrations_dir": "migrations"
+    }
+  ],
+
+  "r2_buckets": [
+    { "binding": "AUDIT_ARCHIVE", "bucket_name": "utap-audit-archive" }
+  ],
+
+  "kv_namespaces": [
+    { "binding": "CONFIG_KV", "id": "00000000000000000000000000000000" }
+  ],
+
+  "queues": {
+    "producers": [{ "binding": "AUDIT_QUEUE", "queue": "utap-audit-fanout" }],
+    "consumers": [
+      {
+        "queue": "utap-audit-fanout",
+        "max_batch_size": 25,
+        "max_batch_timeout": 5
+      }
+    ]
+  },
+
+  "triggers": {
+    // hourly: audit checkpointing to D1 + R2
+    // daily 03:15: budget/audit reconciliation sweep
+    "crons": ["0 * * * *", "15 3 * * *"]
+  },
+
+  "observability": { "enabled": true }
+}
