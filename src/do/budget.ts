@@ -44,6 +44,9 @@ export class BudgetDO extends DurableObject<Env> {
     if ((await this.ctx.storage.get("spent")) === undefined) {
       await this.ctx.storage.put("spent", "0");
     }
+    if ((await this.ctx.storage.get("reserved")) === undefined) {
+      await this.ctx.storage.put("reserved", "0");
+    }
     return { ok: true };
   }
 
@@ -117,6 +120,7 @@ export class BudgetDO extends DurableObject<Env> {
       amountMinor: args.amountMinor,
       expiresAtMs: args.expiresAtMs,
     });
+    await this.setReserved(reserved + amount);
     await this.scheduleSweep(args.expiresAtMs);
     const available = limit - spent - reserved - amount;
     return { ok: true, availableAfter: fromMinor(available, cfg.ccy) };
@@ -130,6 +134,7 @@ export class BudgetDO extends DurableObject<Env> {
     if (!res) return err("no_reservation", `no reservation for ${tid}`);
     const spent = BigInt((await this.ctx.storage.get<string>("spent")) ?? "0") + BigInt(res.amountMinor);
     await this.ctx.storage.delete(`res:${tid}`);
+    await this.setReserved((await this.reservedTotal()) - BigInt(res.amountMinor));
     await this.ctx.storage.put("spent", spent.toString());
     const available = toMinor(cfg.limit, cfg.ccy) - spent - (await this.reservedTotal());
     return {
@@ -141,7 +146,11 @@ export class BudgetDO extends DurableObject<Env> {
 
   /** Release a reservation. Idempotent — releasing a missing tid is a no-op. */
   async release(tid: string): Promise<DOResult> {
-    await this.ctx.storage.delete(`res:${tid}`);
+    const res = await this.ctx.storage.get<Reservation>(`res:${tid}`);
+    if (res) {
+      await this.ctx.storage.delete(`res:${tid}`);
+      await this.setReserved((await this.reservedTotal()) - BigInt(res.amountMinor));
+    }
     return { ok: true };
   }
 
@@ -149,7 +158,10 @@ export class BudgetDO extends DurableObject<Env> {
   async uncommit(tid: string, amountMinor: string, expiresAtMs: number): Promise<DOResult> {
     const spent = BigInt((await this.ctx.storage.get<string>("spent")) ?? "0") - BigInt(amountMinor);
     await this.ctx.storage.put("spent", (spent < 0n ? 0n : spent).toString());
-    await this.ctx.storage.put<Reservation>(`res:${tid}`, { amountMinor, expiresAtMs });
+    if ((await this.ctx.storage.get<Reservation>(`res:${tid}`)) === undefined) {
+      await this.ctx.storage.put<Reservation>(`res:${tid}`, { amountMinor, expiresAtMs });
+      await this.setReserved((await this.reservedTotal()) + BigInt(amountMinor));
+    }
     await this.scheduleSweep(expiresAtMs);
     return { ok: true };
   }
@@ -159,21 +171,27 @@ export class BudgetDO extends DurableObject<Env> {
     const now = Date.now();
     const all = await this.ctx.storage.list<Reservation>({ prefix: "res:" });
     let nextExpiry: number | null = null;
+    let released = 0n;
     for (const [key, res] of all) {
       if (res.expiresAtMs <= now) {
         await this.ctx.storage.delete(key);
+        released += BigInt(res.amountMinor);
       } else if (nextExpiry === null || res.expiresAtMs < nextExpiry) {
         nextExpiry = res.expiresAtMs;
       }
     }
+    if (released > 0n) await this.setReserved((await this.reservedTotal()) - released);
     if (nextExpiry !== null) await this.ctx.storage.setAlarm(nextExpiry);
   }
 
+  /** Maintained running total — O(1) instead of listing every reservation on
+   * each reserve/getState, which matters on hot budget nodes. */
   private async reservedTotal(): Promise<bigint> {
-    const all = await this.ctx.storage.list<Reservation>({ prefix: "res:" });
-    let total = 0n;
-    for (const res of all.values()) total += BigInt(res.amountMinor);
-    return total;
+    return BigInt((await this.ctx.storage.get<string>("reserved")) ?? "0");
+  }
+
+  private async setReserved(value: bigint): Promise<void> {
+    await this.ctx.storage.put("reserved", (value < 0n ? 0n : value).toString());
   }
 
   private async scheduleSweep(candidateMs: number): Promise<void> {

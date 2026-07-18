@@ -12,7 +12,6 @@ const MERCHANT = "did:web:vendor.example";
 const MERCHANT2 = "did:web:othervendor.example";
 
 let person: Actor, agent: Actor, merchant: Actor, merchant2: Actor;
-let personAuth: string, agentAuth: string, merchantAuth: string, merchant2Auth: string;
 
 const now = () => Math.floor(Date.now() / 1000);
 
@@ -39,10 +38,6 @@ beforeAll(async () => {
   merchant = await makeActor(MERCHANT);
   merchant2 = await makeActor(MERCHANT2);
   for (const a of [person, agent, merchant, merchant2]) await registerActor(a);
-  personAuth = await authHeader(person);
-  agentAuth = await authHeader(agent);
-  merchantAuth = await authHeader(merchant);
-  merchant2Auth = await authHeader(merchant2);
 
   const year = new Date().getFullYear();
   const period = { start: `${year}-01-01`, end: `${year + 1}-12-31` };
@@ -81,7 +76,7 @@ beforeAll(async () => {
     jti: "dlg_root_1",
   });
   const issued = await api("/v1/delegations", {
-    auth: personAuth,
+    auth: person,
     body: { credential: rootDelegation },
   });
   expect(issued.status).toBe(201);
@@ -90,7 +85,7 @@ beforeAll(async () => {
 describe("UTAP CFP end-to-end", () => {
   it("runs the full mint → reserve → redeem lifecycle with a verifiable audit trail", async () => {
     // -- mint ---------------------------------------------------------------
-    const minted = await api("/v1/tokens", { auth: agentAuth, body: mintBody({}, [rootDelegation]) });
+    const minted = await api("/v1/tokens", { auth: agent, body: mintBody({}, [rootDelegation]) });
     expect(minted.status, JSON.stringify(minted.body)).toBe(201);
     const token: Token = minted.body.token;
     expect(token.state).toBe("issued");
@@ -103,42 +98,42 @@ describe("UTAP CFP end-to-end", () => {
     expect(await verifyJcs(jwks.body.keys[0], SIG_CONTEXT.token, unsigned, sig!)).toBe(true);
 
     // Budget shows the hierarchical reservation at leaf and root.
-    const leafBudget = await api("/v1/budgets/bud_acme_eng_q3", { auth: personAuth });
+    const leafBudget = await api("/v1/budgets/bud_acme_eng_q3", { auth: person });
     expect(leafBudget.body.budget.reserved).toBe("40000.00");
-    const rootBudget = await api("/v1/budgets/bud_acme", { auth: personAuth });
+    const rootBudget = await api("/v1/budgets/bud_acme", { auth: person });
     expect(rootBudget.body.budget.reserved).toBe("40000.00");
 
     // -- reserve (merchant hold, anti-replay binding) -----------------------
-    const wrongMerchant = await api(`/v1/tokens/${token.tid}/reserve`, { auth: merchant2Auth, body: {} });
+    const wrongMerchant = await api(`/v1/tokens/${token.tid}/reserve`, { auth: merchant2, body: {} });
     expect(wrongMerchant.status).toBe(403); // not on the purpose allow-list
 
-    const reserved = await api(`/v1/tokens/${token.tid}/reserve`, { auth: merchantAuth, body: {} });
+    const reserved = await api(`/v1/tokens/${token.tid}/reserve`, { auth: merchant, body: {} });
     expect(reserved.status, JSON.stringify(reserved.body)).toBe(200);
     expect(reserved.body.token.state).toBe("reserved");
 
-    const replay = await api(`/v1/tokens/${token.tid}/reserve`, { auth: merchantAuth, body: {} });
+    const replay = await api(`/v1/tokens/${token.tid}/reserve`, { auth: merchant, body: {} });
     expect(replay.status).toBe(200); // same-merchant retry is idempotent
 
     // -- redeem -------------------------------------------------------------
-    const badMcc = await api(`/v1/tokens/${token.tid}/redeem`, { auth: merchantAuth, body: { mcc: "9999" } });
+    const badMcc = await api(`/v1/tokens/${token.tid}/redeem`, { auth: merchant, body: { mcc: "9999" } });
     expect(badMcc.status).toBe(400);
 
-    const redeemed = await api(`/v1/tokens/${token.tid}/redeem`, { auth: merchantAuth, body: { mcc: "7372" } });
+    const redeemed = await api(`/v1/tokens/${token.tid}/redeem`, { auth: merchant, body: { mcc: "7372" } });
     expect(redeemed.status, JSON.stringify(redeemed.body)).toBe(200);
     expect(redeemed.body.token.state).toBe("redeemed");
     expect(redeemed.body.budget_after).toBe("210000.00"); // 250000 - 40000
 
     // Double-spend: a second redeem is rejected by the state machine.
-    const doubleSpend = await api(`/v1/tokens/${token.tid}/redeem`, { auth: merchantAuth, body: { mcc: "7372" } });
+    const doubleSpend = await api(`/v1/tokens/${token.tid}/redeem`, { auth: merchant, body: { mcc: "7372" } });
     expect(doubleSpend.status).toBe(409);
     expect(doubleSpend.body.error.code).toBe("invalid_transition");
 
-    const spent = await api("/v1/budgets/bud_acme_eng_q3", { auth: personAuth });
+    const spent = await api("/v1/budgets/bud_acme_eng_q3", { auth: person });
     expect(spent.body.budget.spent).toBe("40000.00");
     expect(spent.body.budget.reserved).toBe("0.00");
 
     // -- audit chain --------------------------------------------------------
-    const audit = await api(`/v1/audit/${ORG}/entries`, { auth: personAuth });
+    const audit = await api(`/v1/audit/${ORG}/entries`, { auth: person });
     const events = (audit.body.entries as AuditEntry[]).map((e) => e.event);
     for (const expected of ["TOKEN_ISSUED", "TOKEN_RESERVED", "TOKEN_REDEEMED", "DELEGATION_ISSUED"]) {
       expect(events).toContain(expected);
@@ -167,14 +162,14 @@ describe("UTAP CFP end-to-end", () => {
   });
 
   it("serialises concurrent redeem attempts: exactly one wins", async () => {
-    const minted = await api("/v1/tokens", { auth: agentAuth, body: mintBody({}, [rootDelegation]) });
+    const minted = await api("/v1/tokens", { auth: agent, body: mintBody({}, [rootDelegation]) });
     expect(minted.status).toBe(201);
     const tid = minted.body.token.tid;
-    const reserved = await api(`/v1/tokens/${tid}/reserve`, { auth: merchantAuth, body: {} });
+    const reserved = await api(`/v1/tokens/${tid}/reserve`, { auth: merchant, body: {} });
     expect(reserved.status).toBe(200);
 
     const attempts = await Promise.all(
-      Array.from({ length: 5 }, () => api(`/v1/tokens/${tid}/redeem`, { auth: merchantAuth, body: { mcc: "7372" } })),
+      Array.from({ length: 5 }, () => api(`/v1/tokens/${tid}/redeem`, { auth: merchant, body: { mcc: "7372" } })),
     );
     expect(attempts.filter((a) => a.status === 200)).toHaveLength(1);
     expect(attempts.filter((a) => a.status === 409)).toHaveLength(4);
@@ -183,15 +178,15 @@ describe("UTAP CFP end-to-end", () => {
   it("replays idempotent mints instead of re-executing them", async () => {
     const key = crypto.randomUUID();
     const body = mintBody({}, [rootDelegation]);
-    const first = await api("/v1/tokens", { auth: agentAuth, body, idempotencyKey: key });
-    const second = await api("/v1/tokens", { auth: agentAuth, body, idempotencyKey: key });
+    const first = await api("/v1/tokens", { auth: agent, body, idempotencyKey: key });
+    const second = await api("/v1/tokens", { auth: agent, body, idempotencyKey: key });
     expect(first.status).toBe(201);
     expect(second.status).toBe(201);
     expect(second.body.token.tid).toBe(first.body.token.tid);
 
     // Same key, different payload → rejected.
     const mismatch = await api("/v1/tokens", {
-      auth: agentAuth,
+      auth: agent,
       body: mintBody({ amount: { value: "1.00", ccy: "EUR" } }, [rootDelegation]),
       idempotencyKey: key,
     });
@@ -199,43 +194,46 @@ describe("UTAP CFP end-to-end", () => {
 
     // Clean up the two extra reservations for later budget assertions.
     for (const tid of [first.body.token.tid]) {
-      const voided = await api(`/v1/tokens/${tid}/void`, { auth: personAuth, body: {} });
+      const voided = await api(`/v1/tokens/${tid}/void`, { auth: person, body: {} });
       expect(voided.status).toBe(200);
     }
   });
 
   it("voids unredeemed tokens and releases the reservation walk", async () => {
-    const minted = await api("/v1/tokens", { auth: agentAuth, body: mintBody({}, [rootDelegation]) });
+    const minted = await api("/v1/tokens", { auth: agent, body: mintBody({}, [rootDelegation]) });
     expect(minted.status).toBe(201);
     const tid = minted.body.token.tid;
 
-    const before = await api("/v1/budgets/bud_acme_eng_q3", { auth: personAuth });
-    const notAllowed = await api(`/v1/tokens/${tid}/void`, { auth: merchantAuth, body: {} });
+    const before = await api("/v1/budgets/bud_acme_eng_q3", { auth: person });
+    const notAllowed = await api(`/v1/tokens/${tid}/void`, { auth: merchant, body: {} });
     expect(notAllowed.status).toBe(403); // merchants are not in the chain
 
-    const voided = await api(`/v1/tokens/${tid}/void`, { auth: personAuth, body: {} });
+    const voided = await api(`/v1/tokens/${tid}/void`, { auth: person, body: {} });
     expect(voided.status).toBe(200);
     expect(voided.body.token.state).toBe("void");
 
-    const after = await api("/v1/budgets/bud_acme_eng_q3", { auth: personAuth });
+    const after = await api("/v1/budgets/bud_acme_eng_q3", { auth: person });
     const toCents = (v: string) => Math.round(Number(v) * 100);
     expect(toCents(after.body.budget.reserved)).toBe(toCents(before.body.budget.reserved) - 4_000_000);
 
-    const reserveVoided = await api(`/v1/tokens/${tid}/reserve`, { auth: merchantAuth, body: {} });
+    const reserveVoided = await api(`/v1/tokens/${tid}/reserve`, { auth: merchant, body: {} });
     expect(reserveVoided.status).toBe(409);
   });
 
   it("enforces delegation scope and revocation at mint", async () => {
     const overScope = await api("/v1/tokens", {
-      auth: agentAuth,
+      auth: agent,
       body: mintBody({ amount: { value: "60000.00", ccy: "EUR" } }, [rootDelegation]),
     });
     expect(overScope.status).toBe(403);
     expect(overScope.body.error.code).toBe("amount_exceeds_scope");
 
     const wrongPurpose = await api("/v1/tokens", {
-      auth: agentAuth,
-      body: mintBody({ purpose: { code: "TRAVEL.FLIGHTS" } }, [rootDelegation]),
+      auth: agent,
+      body: mintBody(
+        { purpose: { code: "TRAVEL.FLIGHTS", constraints: { merchant_allow: [MERCHANT] } } },
+        [rootDelegation],
+      ),
     });
     expect(wrongPurpose.status).toBe(403);
 
@@ -251,26 +249,25 @@ describe("UTAP CFP end-to-end", () => {
       jti: "dlg_sub_1",
       parent_jti: "dlg_root_1",
     });
-    const issued = await api("/v1/delegations", { auth: agentAuth, body: { credential: sub } });
+    const issued = await api("/v1/delegations", { auth: agent, body: { credential: sub } });
     expect(issued.status).toBe(201);
 
-    const chainView = await api("/v1/delegations/dlg_sub_1/chain", { auth: personAuth });
+    const chainView = await api("/v1/delegations/dlg_sub_1/chain", { auth: person });
     expect(chainView.body.valid).toBe(true);
     expect(chainView.body.principal).toBe(PERSON);
 
-    const agent2Auth = await authHeader(agent2);
     const okMint = await api("/v1/tokens", {
-      auth: agent2Auth,
+      auth: agent2,
       body: mintBody({ amount: { value: "1000.00", ccy: "EUR" } }, [rootDelegation, sub]),
     });
     expect(okMint.status, JSON.stringify(okMint.body)).toBe(201);
-    await api(`/v1/tokens/${okMint.body.token.tid}/void`, { auth: personAuth, body: {} });
+    await api(`/v1/tokens/${okMint.body.token.tid}/void`, { auth: person, body: {} });
 
-    const revoked = await api("/v1/delegations/dlg_sub_1", { method: "DELETE", auth: personAuth });
+    const revoked = await api("/v1/delegations/dlg_sub_1", { method: "DELETE", auth: person });
     expect(revoked.status).toBe(200);
 
     const afterRevoke = await api("/v1/tokens", {
-      auth: agent2Auth,
+      auth: agent2,
       body: mintBody({ amount: { value: "1000.00", ccy: "EUR" } }, [rootDelegation, sub]),
     });
     expect(afterRevoke.status).toBe(403);
@@ -294,7 +291,7 @@ describe("UTAP CFP end-to-end", () => {
     expect(created.status).toBe(201);
 
     const pending = await api("/v1/tokens", {
-      auth: agentAuth,
+      auth: agent,
       body: mintBody({ amount: { value: "30000.00", ccy: "EUR" }, budget_ref: "bud_acme_ml" }, [rootDelegation]),
     });
     expect(pending.status).toBe(202);
@@ -305,7 +302,7 @@ describe("UTAP CFP end-to-end", () => {
     const { signJcs } = await import("../../src/lib/crypto");
     const forgedSig = await signJcs(agent.privateJwk, SIG_CONTEXT.approval, forged);
     const rejected = await api(`/v1/approvals/${approvalId}`, {
-      auth: agentAuth,
+      auth: agent,
       body: { approval: forged, sig: forgedSig },
     });
     expect(rejected.status).toBe(403);
@@ -313,21 +310,45 @@ describe("UTAP CFP end-to-end", () => {
     const approval = { approval_id: approvalId, decision: "approve", nonce: crypto.randomUUID() };
     const sig = await signJcs(person.privateJwk, SIG_CONTEXT.approval, approval);
     const approved = await api(`/v1/approvals/${approvalId}`, {
-      auth: agentAuth,
+      auth: agent,
       body: { approval, sig },
     });
     expect(approved.status, JSON.stringify(approved.body)).toBe(201);
     expect(approved.body.token.amt.value).toBe("30000.00");
-    await api(`/v1/tokens/${approved.body.token.tid}/void`, { auth: personAuth, body: {} });
+    await api(`/v1/tokens/${approved.body.token.tid}/void`, { auth: person, body: {} });
+  });
+
+  it("refuses to mint unbound bearer tokens unless explicitly requested", async () => {
+    const noAllowList = await api("/v1/tokens", {
+      auth: agent,
+      body: mintBody({ purpose: { code: "COMPUTE.INFERENCE" } }, [rootDelegation]),
+    });
+    expect(noAllowList.status).toBe(400);
+    expect(noAllowList.body.error.code).toBe("unbound_token");
+
+    const deliberate = await api("/v1/tokens", {
+      auth: agent,
+      body: mintBody({ purpose: { code: "COMPUTE.INFERENCE" }, allow_unbound: true }, [rootDelegation]),
+    });
+    expect(deliberate.status, JSON.stringify(deliberate.body)).toBe(201);
+    await api(`/v1/tokens/${deliberate.body.token.tid}/void`, { auth: person, body: {} });
+  });
+
+  it("rejects replayed auth credentials (single-use nonce)", async () => {
+    const header = await authHeader(person);
+    const first = await api("/v1/budgets/bud_acme", { auth: header });
+    expect(first.status).toBe(200);
+    const replayed = await api("/v1/budgets/bud_acme", { auth: header });
+    expect(replayed.status).toBe(401);
   });
 
   it("keeps token state private without authorisation", async () => {
-    const minted = await api("/v1/tokens", { auth: agentAuth, body: mintBody({}, [rootDelegation]) });
+    const minted = await api("/v1/tokens", { auth: agent, body: mintBody({}, [rootDelegation]) });
     const tid = minted.body.token.tid;
     expect((await api(`/v1/tokens/${tid}`)).status).toBe(401);
-    expect((await api(`/v1/tokens/${tid}`, { auth: merchant2Auth })).status).toBe(403);
-    expect((await api(`/v1/tokens/${tid}`, { auth: merchantAuth })).status).toBe(200); // on allow-list
-    expect((await api(`/v1/tokens/${tid}`, { auth: personAuth })).status).toBe(200); // chain participant
-    await api(`/v1/tokens/${tid}/void`, { auth: personAuth, body: {} });
+    expect((await api(`/v1/tokens/${tid}`, { auth: merchant2 })).status).toBe(403);
+    expect((await api(`/v1/tokens/${tid}`, { auth: merchant })).status).toBe(200); // on allow-list
+    expect((await api(`/v1/tokens/${tid}`, { auth: person })).status).toBe(200); // chain participant
+    await api(`/v1/tokens/${tid}/void`, { auth: person, body: {} });
   });
 });

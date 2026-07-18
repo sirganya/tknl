@@ -103,7 +103,19 @@ delegation chain must be a `person` DID, and revocation is immediate because the
 PrincipalDO is the single writer for its revocation list.
 
 Every mutating request requires an `Idempotency-Key` header; replays return the original response,
-same key with a different payload is rejected (422), concurrent duplicates 409.
+same key with a different payload is rejected (422), concurrent duplicates 409. An `in_progress`
+claim older than 2 minutes is treated as abandoned and may be taken over by a retry.
+
+Additional hardening:
+
+- **Auth nonces are single-use.** Each request credential authenticates exactly once (tracked in
+  the sub DID's PrincipalDO), so a captured credential cannot be replayed within its TTL. Sign a
+  fresh credential per request.
+- **Unbound tokens require explicit opt-in.** A token whose purpose has no `merchant_allow` list
+  is a bearer instrument — any registered DID that sees the URI could reserve and redeem it. Mints
+  without `merchant_allow` are rejected unless the request sets `allow_unbound: true`, and the
+  `TOKEN_ISSUED` audit entry records the choice.
+- **Bootstrap token comparison is constant-time** (SHA-256 digests compared with a full XOR fold).
 
 ## API surface (v0.1)
 

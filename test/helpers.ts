@@ -52,14 +52,18 @@ export async function signDelegation(
 
 export interface CallOptions {
   method?: string;
-  auth?: string;
+  /** An Actor gets a freshly signed credential per request (auth nonces are
+   * single-use); a string is sent verbatim (bootstrap, or replay tests). */
+  auth?: string | Actor;
   body?: unknown;
   idempotencyKey?: string;
 }
 
 export async function api(path: string, opts: CallOptions = {}): Promise<{ status: number; body: any }> {
   const headers: Record<string, string> = { "content-type": "application/json" };
-  if (opts.auth) headers["authorization"] = opts.auth;
+  if (opts.auth) {
+    headers["authorization"] = typeof opts.auth === "string" ? opts.auth : await authHeader(opts.auth);
+  }
   const method = opts.method ?? (opts.body !== undefined ? "POST" : "GET");
   if (["POST", "DELETE", "PATCH"].includes(method)) {
     headers["idempotency-key"] = opts.idempotencyKey ?? crypto.randomUUID();

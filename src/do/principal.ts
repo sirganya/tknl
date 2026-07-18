@@ -53,4 +53,30 @@ export class PrincipalDO extends DurableObject<Env> {
   async getDelegation(jti: string): Promise<DelegationCredential | null> {
     return (await this.ctx.storage.get<DelegationCredential>(`dlg:${jti}`)) ?? null;
   }
+
+  /**
+   * Single-use auth nonces: a request credential's nonce may authenticate
+   * exactly once, closing the replay window inside the credential's TTL.
+   * Returns false if the nonce was already consumed. Expired nonces are
+   * purged by alarm.
+   */
+  async consumeAuthNonce(nonce: string, expiresAtMs: number): Promise<boolean> {
+    const key = `anonce:${nonce}`;
+    if ((await this.ctx.storage.get(key)) !== undefined) return false;
+    await this.ctx.storage.put(key, expiresAtMs);
+    const alarm = await this.ctx.storage.getAlarm();
+    if (alarm === null || expiresAtMs < alarm) await this.ctx.storage.setAlarm(expiresAtMs);
+    return true;
+  }
+
+  async alarm(): Promise<void> {
+    const now = Date.now();
+    const nonces = await this.ctx.storage.list<number>({ prefix: "anonce:" });
+    let next: number | null = null;
+    for (const [key, exp] of nonces) {
+      if (exp <= now) await this.ctx.storage.delete(key);
+      else if (next === null || exp < next) next = exp;
+    }
+    if (next !== null) await this.ctx.storage.setAlarm(next);
+  }
 }

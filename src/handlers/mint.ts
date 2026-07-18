@@ -19,6 +19,10 @@ export interface MintRequest {
   budget_ref: string;
   chain: DelegationCredential[];
   ttl_seconds?: number;
+  /** A token without a merchant_allow list is cash: any registered DID that
+   * sees the URI can reserve and redeem it. Minting one requires this
+   * explicit opt-in, and the audit entry records it. */
+  allow_unbound?: boolean;
 }
 
 export type MintOutcome =
@@ -62,6 +66,13 @@ export async function performMint(
   if (amountMinor <= 0n) return bad("bad_amount", "amount must be positive");
   if (!req.purpose || !isValidPurposeCode(req.purpose.code ?? "")) {
     return bad("bad_purpose", "purpose.code must be a registry code like COMPUTE.INFERENCE");
+  }
+  const merchantAllow = req.purpose.constraints?.merchant_allow;
+  if ((!merchantAllow || merchantAllow.length === 0) && req.allow_unbound !== true) {
+    return bad(
+      "unbound_token",
+      "purpose.constraints.merchant_allow is required: without it the token is a bearer instrument any registered DID can redeem. Pass allow_unbound: true to mint one deliberately.",
+    );
   }
   if (typeof req.budget_ref !== "string" || !req.budget_ref) {
     return bad("bad_budget_ref", "budget_ref is required");
@@ -231,6 +242,9 @@ async function createSignAndAudit(
     purpose_code: token.purpose.code,
     budget_ref: token.budget_ref,
     budget_after: ctx.leafAvailableAfter,
+    ...(req.purpose.constraints?.merchant_allow?.length
+      ? {}
+      : { detail: "unbound bearer token (allow_unbound)" }),
   });
   if (!audited.ok) {
     await env.TOKEN_DO.get(env.TOKEN_DO.idFromName(tid)).destroy();

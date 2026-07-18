@@ -10,6 +10,9 @@ import type { Env } from "../env";
  * Records self-expire via alarm after 24 hours.
  */
 const TTL_MS = 24 * 60 * 60 * 1000;
+/** An in_progress claim older than this is presumed abandoned (Worker died
+ * between begin and complete/abort) and may be taken over by a retry. */
+const STALE_IN_PROGRESS_MS = 2 * 60 * 1000;
 
 interface Record_ {
   fingerprint: string;
@@ -28,12 +31,17 @@ export type BeginResult =
 export class IdempotencyDO extends DurableObject<Env> {
   async begin(fingerprint: string): Promise<BeginResult> {
     const rec = await this.ctx.storage.get<Record_>("rec");
+    const now = Date.now();
     if (rec) {
       if (rec.fingerprint !== fingerprint) return { state: "mismatch" };
-      if (rec.status === "in_progress") return { state: "in_progress" };
+      if (rec.status === "in_progress") {
+        if (now - rec.createdAt <= STALE_IN_PROGRESS_MS) return { state: "in_progress" };
+        // Abandoned claim — let this retry take over.
+        await this.ctx.storage.put<Record_>("rec", { fingerprint, status: "in_progress", createdAt: now });
+        return { state: "new" };
+      }
       return { state: "replay", httpStatus: rec.httpStatus!, body: rec.body! };
     }
-    const now = Date.now();
     await this.ctx.storage.put<Record_>("rec", { fingerprint, status: "in_progress", createdAt: now });
     await this.ctx.storage.setAlarm(now + TTL_MS);
     return { state: "new" };

@@ -1,6 +1,6 @@
 import type { Env } from "./env";
-import { b64uDecode, fromUtf8 } from "./lib/encoding";
-import { SIG_CONTEXT, verifyJcsAny } from "./lib/crypto";
+import { b64uDecode, fromUtf8, utf8 } from "./lib/encoding";
+import { SIG_CONTEXT, sha256, verifyJcsAny } from "./lib/crypto";
 import { isAgentDid, isPersonDid, isValidDid, orgOfDid } from "./lib/did";
 
 /**
@@ -29,12 +29,23 @@ interface AuthPayload {
 
 const MAX_CREDENTIAL_TTL_S = 15 * 60;
 
+/** Constant-time secret comparison: compare SHA-256 digests with a full XOR
+ * fold, so neither content nor length differences short-circuit. */
+async function secretsMatch(a: string, b: string): Promise<boolean> {
+  const [da, db] = await Promise.all([sha256(utf8(a)), sha256(utf8(b))]);
+  let diff = 0;
+  for (let i = 0; i < da.length; i++) diff |= da[i]! ^ db[i]!;
+  return diff === 0;
+}
+
 export async function authenticate(request: Request, env: Env): Promise<AuthContext | null> {
   const header = request.headers.get("authorization");
   if (!header?.startsWith("Bearer ")) return null;
   const token = header.slice("Bearer ".length).trim();
 
-  if (env.BOOTSTRAP_TOKEN && token === env.BOOTSTRAP_TOKEN) return { kind: "bootstrap" };
+  if (env.BOOTSTRAP_TOKEN && (await secretsMatch(token, env.BOOTSTRAP_TOKEN))) {
+    return { kind: "bootstrap" };
+  }
 
   const parts = token.split(".");
   if (parts.length !== 3 || parts[0] !== "utapv0") return null;
@@ -46,6 +57,7 @@ export async function authenticate(request: Request, env: Env): Promise<AuthCont
   }
   if (typeof payload.sub !== "string" || !isValidDid(payload.sub)) return null;
   if (typeof payload.exp !== "number" || typeof payload.nonce !== "string") return null;
+  if (payload.nonce.length < 8 || payload.nonce.length > 200) return null;
 
   const now = Math.floor(Date.now() / 1000);
   if (payload.exp <= now || payload.exp > now + MAX_CREDENTIAL_TTL_S + 60) return null;
@@ -56,6 +68,12 @@ export async function authenticate(request: Request, env: Env): Promise<AuthCont
 
   const ok = await verifyJcsAny(keys, SIG_CONTEXT.auth, payload, "ed25519:" + parts[2]!);
   if (!ok) return null;
+
+  // Single-use nonce: a captured credential cannot be replayed within its
+  // TTL. Consumed only after signature verification so unauthenticated
+  // parties cannot poison another DID's nonce space.
+  const fresh = await principal.consumeAuthNonce(payload.nonce, payload.exp * 1000);
+  if (!fresh) return null;
 
   return {
     kind: "did",
